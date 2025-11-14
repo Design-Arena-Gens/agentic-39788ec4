@@ -1,0 +1,294 @@
+{
+  "name": "Ad Creative Optimizer Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ad-optimizer",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300],
+      "webhookId": "ad-creative-optimizer"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.body.platform }}",
+              "operation": "equals",
+              "value2": "facebook"
+            }
+          ]
+        }
+      },
+      "id": "platform-router",
+      "name": "Platform Router",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://graph.facebook.com/v18.0/act_{{ $json.body.accountId }}/insights",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "ad_name,impressions,clicks,ctr,spend,conversions,cost_per_conversion,creative"
+            },
+            {
+              "name": "level",
+              "value": "ad"
+            },
+            {
+              "name": "time_range",
+              "value": "{'since':'{{ $json.body.startDate }}','until':'{{ $json.body.endDate }}'}"
+            },
+            {
+              "name": "limit",
+              "value": "100"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "fetch-facebook-ads",
+      "name": "Fetch Facebook Ads Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "1",
+          "name": "Facebook Access Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://googleads.googleapis.com/v14/customers/{{ $json.body.accountId }}/googleAds:search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "query",
+              "value": "SELECT ad_group_ad.ad.name, metrics.impressions, metrics.clicks, metrics.ctr, metrics.cost_micros, metrics.conversions, metrics.cost_per_conversion FROM ad_group_ad WHERE segments.date BETWEEN '{{ $json.body.startDate }}' AND '{{ $json.body.endDate }}' ORDER BY metrics.impressions DESC LIMIT 100"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "fetch-google-ads",
+      "name": "Fetch Google Ads Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 400],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "2",
+          "name": "Google Ads OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst ads = [];\n\nfor (const item of items) {\n  const data = item.json.data || item.json.results || [];\n  \n  for (const ad of data) {\n    // Normalize data from Facebook or Google\n    const normalizedAd = {\n      name: ad.ad_name || ad.ad?.name || 'Unknown',\n      impressions: parseInt(ad.impressions || ad.metrics?.impressions || 0),\n      clicks: parseInt(ad.clicks || ad.metrics?.clicks || 0),\n      ctr: parseFloat(ad.ctr || ad.metrics?.ctr || 0),\n      spend: parseFloat(ad.spend || (ad.metrics?.cost_micros / 1000000) || 0),\n      conversions: parseFloat(ad.conversions || ad.metrics?.conversions || 0),\n      costPerConversion: parseFloat(ad.cost_per_conversion || ad.metrics?.cost_per_conversion || 0),\n      creative: ad.creative || ad.ad || {}\n    };\n    \n    // Calculate performance score\n    normalizedAd.performanceScore = (\n      (normalizedAd.ctr * 100) +\n      (normalizedAd.conversions * 10) -\n      (normalizedAd.costPerConversion)\n    );\n    \n    ads.push(normalizedAd);\n  }\n}\n\n// Sort by performance score\nads.sort((a, b) => b.performanceScore - a.performanceScore);\n\n// Get top 5 and bottom 5\nconst topPerformers = ads.slice(0, 5);\nconst bottomPerformers = ads.slice(-5).reverse();\n\nreturn [\n  {\n    json: {\n      topPerformers,\n      bottomPerformers,\n      totalAds: ads.length,\n      avgCTR: ads.reduce((sum, ad) => sum + ad.ctr, 0) / ads.length,\n      avgConversions: ads.reduce((sum, ad) => sum + ad.conversions, 0) / ads.length,\n      totalSpend: ads.reduce((sum, ad) => sum + ad.spend, 0)\n    }\n  }\n];"
+      },
+      "id": "analyze-performance",
+      "name": "Analyze Performance",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "prompt-creation",
+              "name": "aiPrompt",
+              "value": "=You are an expert advertising copywriter and performance marketing analyst.\n\nAnalyze the following ad performance data:\n\n**TOP PERFORMING ADS:**\n{{ $json.topPerformers.map(ad => `- ${ad.name}: CTR ${ad.ctr}%, Conversions ${ad.conversions}, Cost/Conv $${ad.costPerConversion}`).join('\\n') }}\n\n**BOTTOM PERFORMING ADS:**\n{{ $json.bottomPerformers.map(ad => `- ${ad.name}: CTR ${ad.ctr}%, Conversions ${ad.conversions}, Cost/Conv $${ad.costPerConversion}`).join('\\n') }}\n\n**INSIGHTS:**\n- Average CTR: {{ $json.avgCTR }}%\n- Average Conversions: {{ $json.avgConversions }}\n- Total Spend: ${{ $json.totalSpend }}\n\nBased on this analysis:\n1. Identify 3-5 key patterns that make the top performers successful\n2. Identify 3-5 key weaknesses in the bottom performers\n3. Generate 3 NEW optimized ad copy variations that:\n   - Incorporate the winning elements from top performers\n   - Avoid the pitfalls of bottom performers\n   - Are creative, engaging, and conversion-focused\n   - Include: Headline (max 40 chars), Primary Text (max 125 chars), Call-to-Action\n\nFormat your response as JSON:\n{\n  \"insights\": {\n    \"topPatterns\": [\"pattern 1\", \"pattern 2\", ...],\n    \"bottomWeaknesses\": [\"weakness 1\", \"weakness 2\", ...]\n  },\n  \"optimizedCreatives\": [\n    {\n      \"headline\": \"...\",\n      \"primaryText\": \"...\",\n      \"cta\": \"...\",\n      \"reasoning\": \"why this will perform better\"\n    }\n  ]\n}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "prepare-ai-prompt",
+      "name": "Prepare AI Prompt",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.2,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"{{ $json.aiPrompt }}\"\n    }]\n  }],\n  \"generationConfig\": {\n    \"temperature\": 0.7,\n    \"topK\": 40,\n    \"topP\": 0.95,\n    \"maxOutputTokens\": 2048,\n    \"responseMimeType\": \"application/json\"\n  }\n}",
+        "options": {}
+      },
+      "id": "gemini-ai-analysis",
+      "name": "Gemini AI Analysis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1250, 300],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "3",
+          "name": "Gemini API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first();\nconst response = item.json;\n\ntry {\n  // Extract the AI response\n  const aiText = response.candidates[0].content.parts[0].text;\n  const aiResponse = JSON.parse(aiText);\n  \n  // Get original data\n  const originalData = $('Analyze Performance').first().json;\n  \n  return [\n    {\n      json: {\n        success: true,\n        timestamp: new Date().toISOString(),\n        analysis: {\n          topPerformers: originalData.topPerformers,\n          bottomPerformers: originalData.bottomPerformers,\n          metrics: {\n            totalAds: originalData.totalAds,\n            avgCTR: originalData.avgCTR,\n            avgConversions: originalData.avgConversions,\n            totalSpend: originalData.totalSpend\n          }\n        },\n        insights: aiResponse.insights,\n        optimizedCreatives: aiResponse.optimizedCreatives,\n        recommendation: \"Review the 3 optimized ad variations and test them in your ad platform. Monitor performance for at least 3-5 days before scaling.\"\n      }\n    }\n  ];\n} catch (error) {\n  return [\n    {\n      json: {\n        success: false,\n        error: error.message,\n        rawResponse: response\n      }\n    }\n  ];\n}"
+      },
+      "id": "format-response",
+      "name": "Format Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1450, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "webhook-response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1650, 300]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Platform Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Platform Router": {
+      "main": [
+        [
+          {
+            "node": "Fetch Facebook Ads Data",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch Google Ads Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Facebook Ads Data": {
+      "main": [
+        [
+          {
+            "node": "Analyze Performance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Google Ads Data": {
+      "main": [
+        [
+          {
+            "node": "Analyze Performance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Performance": {
+      "main": [
+        [
+          {
+            "node": "Prepare AI Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare AI Prompt": {
+      "main": [
+        [
+          {
+            "node": "Gemini AI Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini AI Analysis": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Response": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2025-11-14T00:00:00.000Z",
+  "versionId": "1"
+}
